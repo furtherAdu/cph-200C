@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchmetrics
+from confidenceinterval import roc_auc_score
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import TQDMProgressBar
 from pytorch_lightning.loggers import CSVLogger
@@ -104,10 +105,12 @@ class Classifer(pl.LightningModule):
         self.num_classes = num_classes
 
         # Define loss fn for classifier
-        self.loss = nn.CrossEntropyLoss()
+        self.loss = nn.BCELoss()
 
-        self.accuracy = torchmetrics.Accuracy(task="multiclass", num_classes=self.num_classes)
-        self.auc = torchmetrics.AUROC(task="binary" if self.num_classes == 2 else "multiclass", num_classes=self.num_classes)
+        self.accuracy = torchmetrics.Accuracy(task="multiclass",
+                                              num_classes=self.num_classes)
+        self.auc = torchmetrics.AUROC(task="binary" if self.num_classes == 2 else "multiclass",
+                                      num_classes=self.num_classes)
         self.outputs = defaultdict(list)
 
     def get_xy(self, batch):
@@ -130,12 +133,12 @@ class Classifer(pl.LightningModule):
     def on_step(self, batch, stage):
         x, y = self.get_xy(batch)
 
-        y_hat = self.forward(x)
+        y_hat = self.forward(x).squeeze()
 
-        loss = self.loss(y_hat, y)
+        loss = self.get_loss(y_hat, y)
 
         self.log(f'{stage}_loss', loss, sync_dist=True, prog_bar=True)
-        self.log(f'{stage}_acc', self.accuracy(y_hat, y), sync_dist=True, prog_bar=True)
+        self.log(f'{stage}_acc', self.get_accuracy(y_hat, y), sync_dist=True, prog_bar=True)
 
         self.outputs[stage].append({
             "y_hat": y_hat,
@@ -155,14 +158,40 @@ class Classifer(pl.LightningModule):
     def on_epoch_end(self, stage):
         y_hat = torch.cat([o["y_hat"] for o in self.outputs[stage]])
         y = torch.cat([o["y"] for o in self.outputs[stage]])
-
-        if self.num_classes == 2:
-            probs = F.softmax(y_hat, dim=-1)[:,-1]
+        probs = self.get_probs_from_logits(y_hat)[:,-1]
+        
+        log_kwargs = dict(sync_dist=True, prog_bar=True)
+        if stage == 'test':
+            if self.num_classes == 2:
+                auc, ci = roc_auc_score(y.detach().numpy(), probs.detach().numpy(), confidence_level=0.95)
+                self.log_dict({f'{stage}_auc':auc,
+                               f'{stage}_ci_lower':ci[0],
+                               f'{stage}_ci_upper':ci[1]}, **log_kwargs)
         else:
-            probs = F.softmax(y_hat, dim=-1)
+            self.log(f"{stage}_auc", self.get_auc(y_hat, y), **log_kwargs)        
 
-        self.log(f"{stage}_auc", self.auc(probs, y.view(-1)), sync_dist=True, prog_bar=True)
         self.outputs[stage] = []
+
+    def get_probs_from_logits(self, y_hat):
+        probs = F.softmax(y_hat, dim=-1)
+        return probs
+
+    def get_loss(self, y_hat, y):
+        loss = self.loss(self.get_probs_from_logits(y_hat).float(),
+                         F.one_hot(y.view(-1)).float())
+        return loss
+    
+    def get_auc(self, y_hat, y):
+        probs = self.get_probs_from_logits(y_hat).float()
+        probs = probs[:,-1] if self.num_classes == 2 else probs
+        auc = self.auc(probs, 
+                       y.view(-1).int())
+        return auc
+
+    def get_accuracy(self, y_hat, y):
+        accuracy = self.accuracy(y_hat.argmax(1).float(), 
+                                 y.view(-1).int())
+        return accuracy
 
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=self.init_lr)

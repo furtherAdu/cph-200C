@@ -47,7 +47,8 @@ class PreFittedEncoder(BaseEstimator, TransformerMixin):
     def transform(self, X):
         return self.encoder.transform(X)
 
-def plot_points_with_ci(df, x_col='x', y_col='y', se_col='se', title='Points with Confidence Intervals', x_label='X Axis', y_label='Y Axis', output_path='plot.png'):
+def plot_points_with_ci(df, x_col='x', y_col='y', chance_level=0.5, se_col='se', title='Points with Confidence Intervals', 
+                        x_label='X Axis', y_label='Y Axis', output_path='plot.png'):
     """
     Plots points with confidence intervals using Seaborn and Times New Roman font,
     with a grid and a gray dashed line for y = 0.
@@ -79,8 +80,8 @@ def plot_points_with_ci(df, x_col='x', y_col='y', se_col='se', title='Points wit
     # Add grid
     plt.grid(True, linestyle='--', alpha=0.5)
 
-    # Add gray dashed line for y = 0
-    plt.axhline(y=0, color='gray', linestyle='--')
+    # Add gray dashed line for y = chance_level
+    plt.axhline(y=chance_level, color='gray', linestyle='--')
 
     # Set labels and title
     plt.title(title, fontsize=16)
